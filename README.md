@@ -18,7 +18,8 @@ libclang.
 
 Supported platforms: macOS, iOS (device and simulator), Android (arm64-v8a,
 armeabi-v7a, x86, x86_64), Linux and Windows. On Apple targets LMDB locks with
-POSIX semaphores, which the App Sandbox allows.
+process-shared pthread mutexes stored in the lock file: the App Sandbox of iOS
+and macOS forbids SysV semaphores and unprefixed named POSIX semaphores.
 
 ## LMDB 1.0 and files from LMDB 0.9
 

@@ -21,7 +21,7 @@ undocumented_unsafe_blocks = "warn"
 
 [package]
 name = "natdb"
-version = "0.1.0"
+version = "0.1.1"
 description = "Safe, idiomatic Rust bindings for LMDB 1.0 (maintained fork of lmdb-rkv)."
 readme = "README.md"
 keywords = ["lmdb", "database", "storage-engine", "bindings", "key-value"]
@@ -40,7 +40,7 @@ name = "natdb"
 [dependencies]
 bitflags = "2.13.2"
 libc.workspace = true
-natdb-sys = { path = "natdb-sys", version = "0.1.0" }
+natdb-sys = { path = "natdb-sys", version = "0.1.1" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

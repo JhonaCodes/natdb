@@ -1,0 +1,22 @@
+natdb
+Copyright 2026 natdb contributors
+
+This product is a fork of, and includes software from:
+
+  lmdb-rkv / lmdb-rkv-sys (https://github.com/mozilla/lmdb-rs)
+  Copyright Mozilla Foundation and the lmdb-rkv contributors
+  (Victor Porof, Myk Melez and others), licensed under the Apache License,
+  Version 2.0.
+
+  lmdb-rs / lmdb-sys (https://github.com/danburkert/lmdb-rs)
+  Copyright 2014 Dan Burkert and the lmdb-rs contributors, licensed under the
+  Apache License, Version 2.0.
+
+The natdb-sys crate bundles, in natdb-sys/lmdb/, unmodified source code of
+
+  LMDB (Lightning Memory-Mapped Database) 1.0.2
+  (https://git.openldap.org/openldap/openldap, tag LMDB_1.0.2)
+  Copyright 2011-2021 Howard Chu, Symas Corp. (individual files may carry
+  other copyright notices), licensed under the OpenLDAP Public License,
+  Version 2.8. See
+  natdb-sys/lmdb/LICENSE and natdb-sys/lmdb/COPYRIGHT.

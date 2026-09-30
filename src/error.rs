@@ -1,14 +1,9 @@
-use libc::c_int;
-use std::error::Error as StdError;
 use std::ffi::CStr;
-use std::os::raw::c_char;
-use std::{
-    fmt,
-    result,
-    str,
-};
+use std::{fmt, result};
 
-use ffi;
+use libc::c_int;
+
+use crate::ffi;
 
 /// An LMDB error kind.
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
@@ -53,6 +48,12 @@ pub enum Error {
     BadValSize,
     /// The specified DBI was changed unexpectedly.
     BadDbi,
+    /// The environment was created by LMDB 0.9.x.
+    ///
+    /// LMDB 1.0 changed the on-disk format and cannot open 0.9 files; natdb does not
+    /// migrate them. The data file is left untouched. `to_err_code` maps this variant
+    /// to `MDB_VERSION_MISMATCH`, the closest LMDB code.
+    LegacyFormat,
     /// Other error.
     Other(c_int),
 }
@@ -86,7 +87,6 @@ impl Error {
     }
 
     /// Converts an `Error` to the raw error code.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub fn to_err_code(&self) -> c_int {
         match *self {
             Error::KeyExist => ffi::MDB_KEYEXIST,
@@ -109,48 +109,34 @@ impl Error {
             Error::BadTxn => ffi::MDB_BAD_TXN,
             Error::BadValSize => ffi::MDB_BAD_VALSIZE,
             Error::BadDbi => ffi::MDB_BAD_DBI,
+            Error::LegacyFormat => ffi::MDB_VERSION_MISMATCH,
             Error::Other(err_code) => err_code,
         }
     }
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "{}", self.description())
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self == Error::LegacyFormat {
+            return fmt.write_str("environment was created by LMDB 0.9, whose file format LMDB 1.0 cannot open");
+        }
+        // SAFETY: `mdb_strerror` accepts any error code and returns a pointer to a
+        // NUL-terminated string that is either static (LMDB codes) or owned by the C
+        // runtime (`strerror`); it is only borrowed for the duration of this call.
+        let message = unsafe { CStr::from_ptr(ffi::mdb_strerror(self.to_err_code())) };
+        fmt.write_str(&message.to_string_lossy())
     }
 }
 
-impl StdError for Error {
-    fn description(&self) -> &str {
-        unsafe {
-            // This is safe since the error messages returned from mdb_strerror are static.
-            let err: *const c_char = ffi::mdb_strerror(self.to_err_code()) as *const c_char;
-            str::from_utf8_unchecked(CStr::from_ptr(err).to_bytes())
-        }
-    }
-}
+impl std::error::Error for Error {}
 
 /// An LMDB result.
 pub type Result<T> = result::Result<T, Error>;
 
-pub fn lmdb_result(err_code: c_int) -> Result<()> {
+pub(crate) fn lmdb_result(err_code: c_int) -> Result<()> {
     if err_code == ffi::MDB_SUCCESS {
         Ok(())
     } else {
         Err(Error::from_err_code(err_code))
-    }
-}
-
-#[cfg(test)]
-mod test {
-
-    use std::error::Error as StdError;
-
-    use super::*;
-
-    #[test]
-    fn test_description() {
-        assert_eq!("Permission denied", Error::from_err_code(13).description());
-        assert_eq!("MDB_NOTFOUND: No matching key/data pair found", Error::NotFound.description());
     }
 }

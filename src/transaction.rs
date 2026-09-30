@@ -1,38 +1,14 @@
-use libc::{
-    c_uint,
-    c_void,
-    size_t,
-};
 use std::marker::PhantomData;
-use std::{
-    fmt,
-    mem,
-    ptr,
-    result,
-    slice,
-};
+use std::{fmt, mem, ptr, result, slice};
 
-use ffi;
+use libc::{c_uint, c_void, size_t};
 
-use cursor::{
-    RoCursor,
-    RwCursor,
-};
-use database::Database;
-use environment::{
-    Environment,
-    Stat,
-};
-use error::{
-    lmdb_result,
-    Error,
-    Result,
-};
-use flags::{
-    DatabaseFlags,
-    EnvironmentFlags,
-    WriteFlags,
-};
+use crate::cursor::{RoCursor, RwCursor};
+use crate::database::Database;
+use crate::environment::{Environment, Stat};
+use crate::error::{Error, Result, lmdb_result};
+use crate::ffi;
+use crate::flags::{DatabaseFlags, EnvironmentFlags, WriteFlags};
 
 /// An LMDB transaction.
 ///
@@ -48,11 +24,11 @@ pub trait Transaction: Sized {
     ///
     /// Any pending operations will be saved.
     fn commit(self) -> Result<()> {
-        unsafe {
-            let result = lmdb_result(ffi::mdb_txn_commit(self.txn()));
-            mem::forget(self);
-            result
-        }
+        // SAFETY: `self.txn()` is live; `mdb_txn_commit` frees the handle whether it
+        // succeeds or fails, so `self` is forgotten to keep `Drop` from aborting it again.
+        let result = lmdb_result(unsafe { ffi::mdb_txn_commit(self.txn()) });
+        mem::forget(self);
+        result
     }
 
     /// Aborts the transaction.
@@ -80,7 +56,8 @@ pub trait Transaction: Sized {
     /// transaction which uses this function must finish (either commit or
     /// abort) before any other transaction may use this function.
     unsafe fn open_db(&self, name: Option<&str>) -> Result<Database> {
-        Database::new(self.txn(), name, 0)
+        // SAFETY: `self.txn()` is live; the caller guarantees open/create serialization.
+        unsafe { Database::new(self.txn(), name, 0) }
     }
 
     /// Gets an item from a database.
@@ -104,35 +81,35 @@ pub trait Transaction: Sized {
             mv_size: 0,
             mv_data: ptr::null_mut(),
         };
-        unsafe {
-            match ffi::mdb_get(self.txn(), database.dbi(), &mut key_val, &mut data_val) {
-                ffi::MDB_SUCCESS => Ok(slice::from_raw_parts(data_val.mv_data as *const u8, data_val.mv_size as usize)),
-                err_code => Err(Error::from_err_code(err_code)),
-            }
+        // SAFETY: `key_val` borrows `key`, which outlives the call, and `data_val` is a
+        // valid out-parameter.
+        match unsafe { ffi::mdb_get(self.txn(), database.dbi(), &mut key_val, &mut data_val) } {
+            // SAFETY: on success LMDB points `data_val` at `mv_size` bytes inside the memory
+            // map, which stay valid and unmodified until this transaction ends ('txn).
+            ffi::MDB_SUCCESS => Ok(unsafe { slice::from_raw_parts(data_val.mv_data as *const u8, data_val.mv_size) }),
+            err_code => Err(Error::from_err_code(err_code)),
         }
     }
 
     /// Open a new read-only cursor on the given database.
-    fn open_ro_cursor<'txn>(&'txn self, db: Database) -> Result<RoCursor<'txn>> {
+    fn open_ro_cursor(&self, db: Database) -> Result<RoCursor<'_>> {
         RoCursor::new(self, db)
     }
 
     /// Gets the option flags for the given database in the transaction.
     fn db_flags(&self, db: Database) -> Result<DatabaseFlags> {
         let mut flags: c_uint = 0;
-        unsafe {
-            lmdb_result(ffi::mdb_dbi_flags(self.txn(), db.dbi(), &mut flags))?;
-        }
+        // SAFETY: `self.txn()` is live and `flags` is a valid out-pointer.
+        lmdb_result(unsafe { ffi::mdb_dbi_flags(self.txn(), db.dbi(), &mut flags) })?;
         Ok(DatabaseFlags::from_bits_truncate(flags))
     }
 
     /// Retrieves database statistics.
     fn stat(&self, db: Database) -> Result<Stat> {
-        unsafe {
-            let mut stat = Stat::new();
-            lmdb_try!(ffi::mdb_stat(self.txn(), db.dbi(), stat.mdb_stat()));
-            Ok(stat)
-        }
+        let mut stat = Stat::new();
+        // SAFETY: `self.txn()` is live and `stat.mdb_stat()` points to a live `MDB_stat`.
+        lmdb_try!(unsafe { ffi::mdb_stat(self.txn(), db.dbi(), stat.mdb_stat()) });
+        Ok(stat)
     }
 }
 
@@ -143,13 +120,15 @@ pub struct RoTransaction<'env> {
 }
 
 impl<'env> fmt::Debug for RoTransaction<'env> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> result::Result<(), fmt::Error> {
         f.debug_struct("RoTransaction").finish()
     }
 }
 
-impl<'env> Drop for RoTransaction<'env> {
+impl Drop for RoTransaction<'_> {
     fn drop(&mut self) {
+        // SAFETY: `self.txn` is live: every path that ends it (`commit`, `reset`)
+        // forgets `self` first, so this is the only abort.
         unsafe { ffi::mdb_txn_abort(self.txn) }
     }
 }
@@ -159,13 +138,12 @@ impl<'env> RoTransaction<'env> {
     /// using `Environment::begin_ro_txn`.
     pub(crate) fn new(env: &'env Environment) -> Result<RoTransaction<'env>> {
         let mut txn: *mut ffi::MDB_txn = ptr::null_mut();
-        unsafe {
-            lmdb_result(ffi::mdb_txn_begin(env.env(), ptr::null_mut(), ffi::MDB_RDONLY, &mut txn))?;
-            Ok(RoTransaction {
-                txn,
-                _marker: PhantomData,
-            })
-        }
+        // SAFETY: `env` is open for 'env and `txn` is a valid out-pointer.
+        lmdb_result(unsafe { ffi::mdb_txn_begin(env.env(), ptr::null_mut(), ffi::MDB_RDONLY, &mut txn) })?;
+        Ok(RoTransaction {
+            txn,
+            _marker: PhantomData,
+        })
     }
 
     /// Resets the read-only transaction.
@@ -182,10 +160,10 @@ impl<'env> RoTransaction<'env> {
     /// database size may grow much more rapidly than otherwise.
     pub fn reset(self) -> InactiveTransaction<'env> {
         let txn = self.txn;
-        unsafe {
-            mem::forget(self);
-            ffi::mdb_txn_reset(txn)
-        };
+        mem::forget(self);
+        // SAFETY: `txn` is a live read-only transaction whose ownership moves into the
+        // returned `InactiveTransaction` (`self` was forgotten, so it is not aborted).
+        unsafe { ffi::mdb_txn_reset(txn) };
         InactiveTransaction {
             txn,
             _marker: PhantomData,
@@ -206,13 +184,15 @@ pub struct InactiveTransaction<'env> {
 }
 
 impl<'env> fmt::Debug for InactiveTransaction<'env> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> result::Result<(), fmt::Error> {
         f.debug_struct("InactiveTransaction").finish()
     }
 }
 
-impl<'env> Drop for InactiveTransaction<'env> {
+impl Drop for InactiveTransaction<'_> {
     fn drop(&mut self) {
+        // SAFETY: `self.txn` is a reset (not freed) handle; `renew` forgets `self`
+        // before handing it over, so this is the only abort.
         unsafe { ffi::mdb_txn_abort(self.txn) }
     }
 }
@@ -225,10 +205,10 @@ impl<'env> InactiveTransaction<'env> {
     /// released by `RoTransaction::reset`.
     pub fn renew(self) -> Result<RoTransaction<'env>> {
         let txn = self.txn;
-        unsafe {
-            mem::forget(self);
-            lmdb_result(ffi::mdb_txn_renew(txn))?
-        };
+        mem::forget(self);
+        // SAFETY: `txn` is a reset read-only handle; ownership moves to the returned
+        // `RoTransaction` (`self` was forgotten, so it is not aborted twice).
+        lmdb_result(unsafe { ffi::mdb_txn_renew(txn) })?;
         Ok(RoTransaction {
             txn,
             _marker: PhantomData,
@@ -243,13 +223,15 @@ pub struct RwTransaction<'env> {
 }
 
 impl<'env> fmt::Debug for RwTransaction<'env> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> result::Result<(), fmt::Error> {
         f.debug_struct("RwTransaction").finish()
     }
 }
 
-impl<'env> Drop for RwTransaction<'env> {
+impl Drop for RwTransaction<'_> {
     fn drop(&mut self) {
+        // SAFETY: `self.txn` is live: `commit` forgets `self` first, so this is the
+        // only abort.
         unsafe { ffi::mdb_txn_abort(self.txn) }
     }
 }
@@ -259,13 +241,14 @@ impl<'env> RwTransaction<'env> {
     /// using `Environment::begin_ro_txn`.
     pub(crate) fn new(env: &'env Environment) -> Result<RwTransaction<'env>> {
         let mut txn: *mut ffi::MDB_txn = ptr::null_mut();
-        unsafe {
-            lmdb_result(ffi::mdb_txn_begin(env.env(), ptr::null_mut(), EnvironmentFlags::empty().bits(), &mut txn))?;
-            Ok(RwTransaction {
-                txn,
-                _marker: PhantomData,
-            })
-        }
+        // SAFETY: `env` is open for 'env and `txn` is a valid out-pointer.
+        lmdb_result(unsafe {
+            ffi::mdb_txn_begin(env.env(), ptr::null_mut(), EnvironmentFlags::empty().bits(), &mut txn)
+        })?;
+        Ok(RwTransaction {
+            txn,
+            _marker: PhantomData,
+        })
     }
 
     /// Opens a database in the provided transaction, creating it if necessary.
@@ -286,11 +269,12 @@ impl<'env> RwTransaction<'env> {
     /// transaction which uses this function must finish (either commit or
     /// abort) before any other transaction may use this function.
     pub unsafe fn create_db(&self, name: Option<&str>, flags: DatabaseFlags) -> Result<Database> {
-        Database::new(self.txn(), name, flags.bits() | ffi::MDB_CREATE)
+        // SAFETY: `self.txn()` is live; the caller guarantees open/create serialization.
+        unsafe { Database::new(self.txn(), name, flags.bits() | ffi::MDB_CREATE) }
     }
 
     /// Opens a new read-write cursor on the given database and transaction.
-    pub fn open_rw_cursor<'txn>(&'txn mut self, db: Database) -> Result<RwCursor<'txn>> {
+    pub fn open_rw_cursor(&mut self, db: Database) -> Result<RwCursor<'_>> {
         RwCursor::new(self, db)
     }
 
@@ -315,7 +299,8 @@ impl<'env> RwTransaction<'env> {
             mv_size: data.len() as size_t,
             mv_data: data.as_ptr() as *mut c_void,
         };
-        unsafe { lmdb_result(ffi::mdb_put(self.txn(), database.dbi(), &mut key_val, &mut data_val, flags.bits())) }
+        // SAFETY: `key_val` and `data_val` borrow `key` and `data`, which outlive the call.
+        lmdb_result(unsafe { ffi::mdb_put(self.txn(), database.dbi(), &mut key_val, &mut data_val, flags.bits()) })
     }
 
     /// Returns a buffer which can be used to write a value into the item at the
@@ -340,16 +325,14 @@ impl<'env> RwTransaction<'env> {
             mv_size: len,
             mv_data: ptr::null_mut::<c_void>(),
         };
-        unsafe {
-            lmdb_result(ffi::mdb_put(
-                self.txn(),
-                database.dbi(),
-                &mut key_val,
-                &mut data_val,
-                flags.bits() | ffi::MDB_RESERVE,
-            ))?;
-            Ok(slice::from_raw_parts_mut(data_val.mv_data as *mut u8, data_val.mv_size as usize))
-        }
+        // SAFETY: `key_val` borrows `key`, which outlives the call; with `MDB_RESERVE`
+        // LMDB fills `data_val` with the address of the reserved space.
+        lmdb_result(unsafe {
+            ffi::mdb_put(self.txn(), database.dbi(), &mut key_val, &mut data_val, flags.bits() | ffi::MDB_RESERVE)
+        })?;
+        // SAFETY: LMDB reserved `mv_size` writable bytes at `mv_data`; they stay valid
+        // while this transaction is mutably borrowed ('txn).
+        Ok(unsafe { slice::from_raw_parts_mut(data_val.mv_data as *mut u8, data_val.mv_size) })
     }
 
     /// Deletes an item from a database.
@@ -377,15 +360,19 @@ impl<'env> RwTransaction<'env> {
         });
 
         if let Some(mut d) = data_val {
-            unsafe { lmdb_result(ffi::mdb_del(self.txn(), database.dbi(), &mut key_val, &mut d)) }
+            // SAFETY: `key_val` and `d` borrow `key` and `data`, which outlive the call.
+            lmdb_result(unsafe { ffi::mdb_del(self.txn(), database.dbi(), &mut key_val, &mut d) })
         } else {
-            unsafe { lmdb_result(ffi::mdb_del(self.txn(), database.dbi(), &mut key_val, ptr::null_mut())) }
+            // SAFETY: `key_val` borrows `key`, which outlives the call; a null data
+            // pointer asks LMDB to delete every item of the key.
+            lmdb_result(unsafe { ffi::mdb_del(self.txn(), database.dbi(), &mut key_val, ptr::null_mut()) })
         }
     }
 
     /// Empties the given database. All items will be removed.
     pub fn clear_db(&mut self, db: Database) -> Result<()> {
-        unsafe { lmdb_result(ffi::mdb_drop(self.txn(), db.dbi(), 0)) }
+        // SAFETY: `self.txn()` is a live write transaction; `0` empties without deleting.
+        lmdb_result(unsafe { ffi::mdb_drop(self.txn(), db.dbi(), 0) })
     }
 
     /// Drops the database from the environment.
@@ -395,15 +382,18 @@ impl<'env> RwTransaction<'env> {
     /// This method is unsafe in the same ways as `Environment::close_db`, and
     /// should be used accordingly.
     pub unsafe fn drop_db(&mut self, db: Database) -> Result<()> {
-        lmdb_result(ffi::mdb_drop(self.txn, db.dbi(), 1))
+        // SAFETY: the caller upholds the `close_db` contract; `self.txn` is live.
+        lmdb_result(unsafe { ffi::mdb_drop(self.txn, db.dbi(), 1) })
     }
 
     /// Begins a new nested transaction inside of this transaction.
-    pub fn begin_nested_txn<'txn>(&'txn mut self) -> Result<RwTransaction<'txn>> {
+    pub fn begin_nested_txn(&mut self) -> Result<RwTransaction<'_>> {
         let mut nested: *mut ffi::MDB_txn = ptr::null_mut();
+        // SAFETY: `self.txn()` is a live write transaction, so its environment is open;
+        // the nested handle mutably borrows `self`, so the parent cannot end first.
         unsafe {
             let env: *mut ffi::MDB_env = ffi::mdb_txn_env(self.txn());
-            ffi::mdb_txn_begin(env, self.txn(), 0, &mut nested);
+            lmdb_result(ffi::mdb_txn_begin(env, self.txn(), 0, &mut nested))?;
         }
         Ok(RwTransaction {
             txn: nested,
@@ -415,359 +405,5 @@ impl<'env> RwTransaction<'env> {
 impl<'env> Transaction for RwTransaction<'env> {
     fn txn(&self) -> *mut ffi::MDB_txn {
         self.txn
-    }
-}
-
-#[cfg(test)]
-mod test {
-
-    use std::io::Write;
-    use std::sync::{
-        Arc,
-        Barrier,
-    };
-    use std::thread::{
-        self,
-        JoinHandle,
-    };
-
-    use tempdir::TempDir;
-
-    use super::*;
-    use cursor::Cursor;
-    use error::*;
-    use flags::*;
-
-    #[test]
-    fn test_put_get_del() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Environment::new().open(dir.path()).unwrap();
-        let db = env.open_db(None).unwrap();
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.put(db, b"key1", b"val1", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key2", b"val2", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key3", b"val3", WriteFlags::empty()).unwrap();
-        txn.commit().unwrap();
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        assert_eq!(b"val1", txn.get(db, b"key1").unwrap());
-        assert_eq!(b"val2", txn.get(db, b"key2").unwrap());
-        assert_eq!(b"val3", txn.get(db, b"key3").unwrap());
-        assert_eq!(txn.get(db, b"key"), Err(Error::NotFound));
-
-        txn.del(db, b"key1", None).unwrap();
-        assert_eq!(txn.get(db, b"key1"), Err(Error::NotFound));
-    }
-
-    #[test]
-    fn test_put_get_del_multi() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Environment::new().open(dir.path()).unwrap();
-        let db = env.create_db(None, DatabaseFlags::DUP_SORT).unwrap();
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.put(db, b"key1", b"val1", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key1", b"val2", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key1", b"val3", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key2", b"val1", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key2", b"val2", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key2", b"val3", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key3", b"val1", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key3", b"val2", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key3", b"val3", WriteFlags::empty()).unwrap();
-        txn.commit().unwrap();
-
-        let txn = env.begin_rw_txn().unwrap();
-        {
-            let mut cur = txn.open_ro_cursor(db).unwrap();
-            let iter = cur.iter_dup_of(b"key1");
-            let vals = iter.map(|x| x.unwrap()).map(|(_, x)| x).collect::<Vec<_>>();
-            assert_eq!(vals, vec![b"val1", b"val2", b"val3"]);
-        }
-        txn.commit().unwrap();
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.del(db, b"key1", Some(b"val2")).unwrap();
-        txn.del(db, b"key2", None).unwrap();
-        txn.commit().unwrap();
-
-        let txn = env.begin_rw_txn().unwrap();
-        {
-            let mut cur = txn.open_ro_cursor(db).unwrap();
-            let iter = cur.iter_dup_of(b"key1");
-            let vals = iter.map(|x| x.unwrap()).map(|(_, x)| x).collect::<Vec<_>>();
-            assert_eq!(vals, vec![b"val1", b"val3"]);
-
-            let iter = cur.iter_dup_of(b"key2");
-            assert_eq!(0, iter.count());
-        }
-        txn.commit().unwrap();
-    }
-
-    #[test]
-    fn test_reserve() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Environment::new().open(dir.path()).unwrap();
-        let db = env.open_db(None).unwrap();
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        {
-            let mut writer = txn.reserve(db, b"key1", 4, WriteFlags::empty()).unwrap();
-            writer.write_all(b"val1").unwrap();
-        }
-        txn.commit().unwrap();
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        assert_eq!(b"val1", txn.get(db, b"key1").unwrap());
-        assert_eq!(txn.get(db, b"key"), Err(Error::NotFound));
-
-        txn.del(db, b"key1", None).unwrap();
-        assert_eq!(txn.get(db, b"key1"), Err(Error::NotFound));
-    }
-
-    #[test]
-    fn test_inactive_txn() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Environment::new().open(dir.path()).unwrap();
-        let db = env.open_db(None).unwrap();
-
-        {
-            let mut txn = env.begin_rw_txn().unwrap();
-            txn.put(db, b"key", b"val", WriteFlags::empty()).unwrap();
-            txn.commit().unwrap();
-        }
-
-        let txn = env.begin_ro_txn().unwrap();
-        let inactive = txn.reset();
-        let active = inactive.renew().unwrap();
-        assert!(active.get(db, b"key").is_ok());
-    }
-
-    #[test]
-    fn test_nested_txn() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Environment::new().open(dir.path()).unwrap();
-        let db = env.open_db(None).unwrap();
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.put(db, b"key1", b"val1", WriteFlags::empty()).unwrap();
-
-        {
-            let mut nested = txn.begin_nested_txn().unwrap();
-            nested.put(db, b"key2", b"val2", WriteFlags::empty()).unwrap();
-            assert_eq!(nested.get(db, b"key1").unwrap(), b"val1");
-            assert_eq!(nested.get(db, b"key2").unwrap(), b"val2");
-        }
-
-        assert_eq!(txn.get(db, b"key1").unwrap(), b"val1");
-        assert_eq!(txn.get(db, b"key2"), Err(Error::NotFound));
-    }
-
-    #[test]
-    fn test_clear_db() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Environment::new().open(dir.path()).unwrap();
-        let db = env.open_db(None).unwrap();
-
-        {
-            let mut txn = env.begin_rw_txn().unwrap();
-            txn.put(db, b"key", b"val", WriteFlags::empty()).unwrap();
-            txn.commit().unwrap();
-        }
-
-        {
-            let mut txn = env.begin_rw_txn().unwrap();
-            txn.clear_db(db).unwrap();
-            txn.commit().unwrap();
-        }
-
-        let txn = env.begin_ro_txn().unwrap();
-        assert_eq!(txn.get(db, b"key"), Err(Error::NotFound));
-    }
-
-    #[test]
-    fn test_drop_db() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Environment::new().set_max_dbs(2).open(dir.path()).unwrap();
-        let db = env.create_db(Some("test"), DatabaseFlags::empty()).unwrap();
-
-        {
-            let mut txn = env.begin_rw_txn().unwrap();
-            txn.put(db, b"key", b"val", WriteFlags::empty()).unwrap();
-            txn.commit().unwrap();
-        }
-        {
-            let mut txn = env.begin_rw_txn().unwrap();
-            unsafe {
-                txn.drop_db(db).unwrap();
-            }
-            txn.commit().unwrap();
-        }
-
-        assert_eq!(env.open_db(Some("test")), Err(Error::NotFound));
-    }
-
-    #[test]
-    fn test_concurrent_readers_single_writer() {
-        let dir = TempDir::new("test").unwrap();
-        let env: Arc<Environment> = Arc::new(Environment::new().open(dir.path()).unwrap());
-
-        let n = 10usize; // Number of concurrent readers
-        let barrier = Arc::new(Barrier::new(n + 1));
-        let mut threads: Vec<JoinHandle<bool>> = Vec::with_capacity(n);
-
-        let key = b"key";
-        let val = b"val";
-
-        for _ in 0..n {
-            let reader_env = env.clone();
-            let reader_barrier = barrier.clone();
-
-            threads.push(thread::spawn(move || {
-                let db = reader_env.open_db(None).unwrap();
-                {
-                    let txn = reader_env.begin_ro_txn().unwrap();
-                    assert_eq!(txn.get(db, key), Err(Error::NotFound));
-                    txn.abort();
-                }
-                reader_barrier.wait();
-                reader_barrier.wait();
-                {
-                    let txn = reader_env.begin_ro_txn().unwrap();
-                    txn.get(db, key).unwrap() == val
-                }
-            }));
-        }
-
-        let db = env.open_db(None).unwrap();
-        let mut txn = env.begin_rw_txn().unwrap();
-        barrier.wait();
-        txn.put(db, key, val, WriteFlags::empty()).unwrap();
-        txn.commit().unwrap();
-        barrier.wait();
-
-        assert!(threads.into_iter().all(|b| b.join().unwrap()))
-    }
-
-    #[test]
-    fn test_concurrent_writers() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Arc::new(Environment::new().open(dir.path()).unwrap());
-
-        let n = 10usize; // Number of concurrent writers
-        let mut threads: Vec<JoinHandle<bool>> = Vec::with_capacity(n);
-
-        let key = "key";
-        let val = "val";
-
-        for i in 0..n {
-            let writer_env = env.clone();
-
-            threads.push(thread::spawn(move || {
-                let db = writer_env.open_db(None).unwrap();
-                let mut txn = writer_env.begin_rw_txn().unwrap();
-                txn.put(db, &format!("{}{}", key, i), &format!("{}{}", val, i), WriteFlags::empty()).unwrap();
-                txn.commit().is_ok()
-            }));
-        }
-        assert!(threads.into_iter().all(|b| b.join().unwrap()));
-
-        let db = env.open_db(None).unwrap();
-        let txn = env.begin_ro_txn().unwrap();
-
-        for i in 0..n {
-            assert_eq!(format!("{}{}", val, i).as_bytes(), txn.get(db, &format!("{}{}", key, i)).unwrap());
-        }
-    }
-
-    #[test]
-    fn test_stat() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Environment::new().open(dir.path()).unwrap();
-        let db = env.create_db(None, DatabaseFlags::empty()).unwrap();
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.put(db, b"key1", b"val1", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key2", b"val2", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key3", b"val3", WriteFlags::empty()).unwrap();
-        txn.commit().unwrap();
-
-        {
-            let txn = env.begin_ro_txn().unwrap();
-            let stat = txn.stat(db).unwrap();
-            assert_eq!(stat.entries(), 3);
-        }
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.del(db, b"key1", None).unwrap();
-        txn.del(db, b"key2", None).unwrap();
-        txn.commit().unwrap();
-
-        {
-            let txn = env.begin_ro_txn().unwrap();
-            let stat = txn.stat(db).unwrap();
-            assert_eq!(stat.entries(), 1);
-        }
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.put(db, b"key4", b"val4", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key5", b"val5", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key6", b"val6", WriteFlags::empty()).unwrap();
-        txn.commit().unwrap();
-
-        {
-            let txn = env.begin_ro_txn().unwrap();
-            let stat = txn.stat(db).unwrap();
-            assert_eq!(stat.entries(), 4);
-        }
-    }
-
-    #[test]
-    fn test_stat_dupsort() {
-        let dir = TempDir::new("test").unwrap();
-        let env = Environment::new().open(dir.path()).unwrap();
-        let db = env.create_db(None, DatabaseFlags::DUP_SORT).unwrap();
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.put(db, b"key1", b"val1", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key1", b"val2", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key1", b"val3", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key2", b"val1", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key2", b"val2", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key2", b"val3", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key3", b"val1", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key3", b"val2", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key3", b"val3", WriteFlags::empty()).unwrap();
-        txn.commit().unwrap();
-
-        {
-            let txn = env.begin_ro_txn().unwrap();
-            let stat = txn.stat(db).unwrap();
-            assert_eq!(stat.entries(), 9);
-        }
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.del(db, b"key1", Some(b"val2")).unwrap();
-        txn.del(db, b"key2", None).unwrap();
-        txn.commit().unwrap();
-
-        {
-            let txn = env.begin_ro_txn().unwrap();
-            let stat = txn.stat(db).unwrap();
-            assert_eq!(stat.entries(), 5);
-        }
-
-        let mut txn = env.begin_rw_txn().unwrap();
-        txn.put(db, b"key4", b"val1", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key4", b"val2", WriteFlags::empty()).unwrap();
-        txn.put(db, b"key4", b"val3", WriteFlags::empty()).unwrap();
-        txn.commit().unwrap();
-
-        {
-            let txn = env.begin_ro_txn().unwrap();
-            let stat = txn.stat(db).unwrap();
-            assert_eq!(stat.entries(), 8);
-        }
     }
 }

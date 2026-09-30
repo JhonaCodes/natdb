@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [natdb, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  cross-build:
+    name: cross-build (iOS, Android)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28c
+          add-to-path: false
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: Build for iOS (device)
+        run: cargo build --workspace --target aarch64-apple-ios
+      - name: Build for iOS (simulator)
+        run: cargo build --workspace --target aarch64-apple-ios-sim
+      - name: Build for Android (4 ABIs)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 build --workspace

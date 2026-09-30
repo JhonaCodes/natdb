@@ -1,13 +1,10 @@
-use libc::c_uint;
 use std::ffi::CString;
 use std::ptr;
 
-use ffi;
+use libc::c_uint;
 
-use error::{
-    lmdb_result,
-    Result,
-};
+use crate::error::{Error, Result, lmdb_result};
+use crate::ffi;
 
 /// A handle to an individual database in an environment.
 ///
@@ -22,15 +19,22 @@ impl Database {
     ///
     /// Prefer using `Environment::open_db`, `Environment::create_db`, `TransactionExt::open_db`,
     /// or `RwTransaction::create_db`.
+    ///
+    /// # Safety
+    ///
+    /// `txn` must be a live transaction handle, and no other transaction may open or
+    /// create databases in the same environment concurrently.
     pub(crate) unsafe fn new(txn: *mut ffi::MDB_txn, name: Option<&str>, flags: c_uint) -> Result<Database> {
-        let c_name = name.map(|n| CString::new(n).unwrap());
+        let c_name = name.map(CString::new).transpose().map_err(|_| Error::Invalid)?;
         let name_ptr = if let Some(ref c_name) = c_name {
             c_name.as_ptr()
         } else {
             ptr::null()
         };
         let mut dbi: ffi::MDB_dbi = 0;
-        lmdb_result(ffi::mdb_dbi_open(txn, name_ptr, flags, &mut dbi))?;
+        // SAFETY: the caller guarantees `txn` is live and that database opening is
+        // serialized; `name_ptr` is null or points into `c_name`, which outlives the call.
+        lmdb_result(unsafe { ffi::mdb_dbi_open(txn, name_ptr, flags, &mut dbi) })?;
         Ok(Database {
             dbi,
         })
@@ -46,11 +50,13 @@ impl Database {
     ///
     /// The caller **must** ensure that the handle is not used after the lifetime of the
     /// environment, or after the database has been closed.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub fn dbi(&self) -> ffi::MDB_dbi {
         self.dbi
     }
 }
 
+// SAFETY: a `Database` is only a `MDB_dbi` integer; LMDB allows DBI handles to be
+// shared by any transaction of the environment, from any thread.
 unsafe impl Sync for Database {}
+// SAFETY: see the `Sync` impl above.
 unsafe impl Send for Database {}

@@ -1,58 +1,49 @@
-[package]
-name = "lmdb-rkv"
-# NB: When modifying, also modify html_root_url in lib.rs
-version = "0.14.0"
-authors = ["Dan Burkert <dan@danburkert.com>", "Victor Porof <vporof@mozilla.com>"]
-license = "Apache-2.0"
-description = "Idiomatic and safe LMDB wrapper."
-documentation = "https://docs.rs/lmdb-rkv"
-homepage = "https://github.com/mozilla/lmdb-rs"
-repository = "https://github.com/mozilla/lmdb-rs.git"
-readme = "README.md"
-keywords = ["LMDB", "database", "storage-engine", "bindings", "library"]
-categories = ["database"]
+[workspace]
+members = [".", "natdb-sys"]
+resolver = "3"
 
-exclude = [
-  # Exclude CI config files from package.
-  "/.appveyor.yml",
-  "/.travis.yml",
-  "/azure-pipelines-template.yml",
-  "/azure-pipelines.yml",
-]
+[workspace.package]
+edition = "2024"
+# Edition 2024 requires Rust 1.85. Verified with `cargo +1.85.0 test --workspace`.
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/JhonaCodes/natdb"
+homepage = "https://github.com/JhonaCodes/natdb"
+
+[workspace.dependencies]
+libc = "0.2.189"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+[package]
+name = "natdb"
+version = "0.1.0"
+description = "Safe, idiomatic Rust bindings for LMDB 1.0 (maintained fork of lmdb-rkv)."
+readme = "README.md"
+keywords = ["lmdb", "database", "storage-engine", "bindings", "key-value"]
+categories = ["database"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/natdb"
+exclude = ["/.github", "/docs"]
 
 [lib]
-name = "lmdb"
-
-[badges]
-travis-ci = { repository = "mozilla/lmdb-rs" }
-appveyor = { repository = "mozilla/lmdb-rs" }
-
-[workspace]
-members = [
-  "lmdb-sys",
-]
+name = "natdb"
 
 [dependencies]
-bitflags = "1"
-byteorder = "1"
-libc = "0.2"
-
-# In order to ensure that we test lmdb-rkv in CI against the in-tree version
-# of lmdb-rkv-sys, we specify the dependency as a path here.
-#
-# But we can't publish the lmdb-rkv crate to crates.io with a path dependency,
-# so we have to temporarily change this to point to the current version
-# of lmdb-rkv-sys on crates.io when publishing lmdb-rkv to that crate registry.
-#
-# (See "Publishing to crates.io" in README.md for more information.)
-lmdb-rkv-sys = { path = "./lmdb-sys" }
+bitflags = "2.13.2"
+libc.workspace = true
+natdb-sys = { path = "natdb-sys", version = "0.1.0" }
 
 [dev-dependencies]
-rand = "0.4"
-tempdir = "0.3"
+tempfile = "3.27.0"
 
-[features]
-default = []
-with-asan = ["lmdb-rkv-sys/with-asan"]
-with-fuzzer = ["lmdb-rkv-sys/with-fuzzer"]
-with-fuzzer-no-link = ["lmdb-rkv-sys/with-fuzzer-no-link"]
+[lints]
+workspace = true

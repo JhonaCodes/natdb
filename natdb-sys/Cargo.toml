@@ -1,0 +1,56 @@
+[package]
+name = "natdb-sys"
+version = "0.1.0"
+description = "Raw FFI bindings to LMDB, built from vendored upstream sources."
+readme = "../README.md"
+keywords = ["lmdb", "database", "storage-engine", "bindings", "ffi"]
+categories = ["database", "external-ffi-bindings"]
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0 AND OLDAP-2.8"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/natdb-sys"
+build = "build.rs"
+
+[lib]
+name = "natdb_sys"
+# The generated bindings carry LMDB's Doxygen comments, which are not Rust
+# doctests.
+doctest = false
+
+[dependencies]
+libc.workspace = true
+
+[build-dependencies]
+cc = "1.5.1"
+# Only needed to regenerate `src/bindings.rs` (`--features bindgen`); the
+# generated file is committed so regular builds do not need libclang.
+bindgen = { version = "0.73.2", default-features = false, optional = true, features = ["runtime"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[features]
+default = []
+# These features configure the MDB_IDL_LOGN macro, which determines
+# the size of the free and dirty page lists (and thus the amount of memory
+# allocated when opening an LMDB environment in read-write mode).
+#
+# Each feature defines MDB_IDL_LOGN as the value in the name of the feature.
+# That means these features are mutually exclusive, and you must not specify
+# more than one at the same time (or the crate will fail to compile).
+#
+# For more information on the motivation for these features (and their effect),
+# see https://github.com/mozilla/lmdb/pull/2.
+mdb_idl_logn_8 = []
+mdb_idl_logn_9 = []
+mdb_idl_logn_10 = []
+mdb_idl_logn_11 = []
+mdb_idl_logn_12 = []
+mdb_idl_logn_13 = []
+mdb_idl_logn_14 = []
+mdb_idl_logn_15 = []
+
+[lints]
+workspace = true

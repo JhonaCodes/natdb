@@ -1,6 +1,6 @@
 [package]
 name = "natdb-sys"
-version = "0.1.0"
+version = "0.1.1"
 description = "Raw FFI bindings to LMDB, built from vendored upstream sources."
 readme = "../README.md"
 keywords = ["lmdb", "database", "storage-engine", "bindings", "ffi"]

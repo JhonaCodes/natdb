@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 — 2026-10-01
+
+- Apple platforms lock with process-shared pthread mutexes stored in the lock
+  file instead of named POSIX semaphores. The iOS and macOS App Sandbox only
+  allow semaphore names that start with an application group identifier, so
+  `mdb_env_open` failed with `EPERM` in sandboxed apps (every iOS app and
+  every Mac App Store app).
+
 ## 0.1.0 — 2026-10-01
 
 First release of natdb, a maintained continuation of `mozilla/lmdb-rs`

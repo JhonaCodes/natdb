@@ -98,12 +98,15 @@ fn run() -> Result<(), BuildError> {
     }
 
     if target_vendor == "apple" {
-        // The iOS and macOS App Sandbox forbid SysV semaphores; LMDB must use
-        // named POSIX semaphores for its reader/writer locks. LMDB 1.0.2 already
-        // picks them on Apple unless MDB_USE_ROBUST is set (mdb.c, "__APPLE__"
-        // branch of the platform block); defining it here keeps that guarantee
-        // independent of upstream defaults.
-        builder.define("MDB_USE_POSIX_SEM", "1");
+        // The iOS and macOS App Sandbox forbid SysV semaphores, and named POSIX
+        // semaphores unless their name starts with an application group
+        // identifier (sem_open fails with EPERM for LMDB's "/MDB..." names).
+        // Process-shared pthread mutexes live in the memory-mapped lock file and
+        // need no name, so they work inside the sandbox. Darwin has no robust
+        // mutexes: if a process dies holding the writer lock, the next process
+        // to open the environment alone reinitializes the lock file.
+        builder.define("MDB_USE_POSIX_MUTEX", "1");
+        builder.define("MDB_USE_ROBUST", "0");
     }
 
     builder.try_compile("lmdb").map_err(BuildError::Compile)?;
